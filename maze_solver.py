@@ -10,47 +10,52 @@ from maze_reader import (
     update_fire_in_hazards, Hazard,
 )
 
-CELL_PX   = 20
-SAVE_PATH = "results/maze_knowledge.json"
+CELL_PX       = 20
+SAVE_PATH     = "results/maze_knowledge.json"
+DANGER_WEIGHT  = 5
+REVISIT_WEIGHT = 3
 
 DIRECTIONS = {"up": (-1,0), "right": (0,1), "down": (1,0), "left": (0,-1)}
 OPPOSITE   = {"up":"down", "down":"up", "left":"right", "right":"left"}
 
+
 # ---------------------------------------------------------------------------
-# Knowledge: what exits does each cell have?
-# { (row,col): ["up", "right", ...] }
+# Save / Load
 # ---------------------------------------------------------------------------
 
 def save_knowledge(cell_exits, move_log):
-    """Save discovered exits + this run's move log. Appends to existing file."""
+    """Save discovered exits (with visit/death counts) and move log."""
     path = Path(SAVE_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Load existing data or start fresh
     if path.exists():
         with open(path) as f:
             data = json.load(f)
     else:
         data = {"runs": 0, "cell_exits": {}, "move_history": []}
 
-    # Merge cell_exits (union — never lose knowledge)
+    # Merge cell_exits — each direction is {"visits": x, "deaths": y}
     for cell, dirs in cell_exits.items():
         key = str(cell)
-        existing = set(data["cell_exits"].get(key, []))
-        data["cell_exits"][key] = list(existing | set(dirs))
+        if key not in data["cell_exits"]:
+            data["cell_exits"][key] = {}
+
+        for direction, stats in dirs.items():
+            if direction not in data["cell_exits"][key]:
+                data["cell_exits"][key][direction] = {"visits": 0, "deaths": 0}
+
+            saved = data["cell_exits"][key][direction]
+            saved["visits"] = max(saved["visits"], stats["visits"])
+            saved["deaths"] = max(saved["deaths"], stats["deaths"])
 
     # Append this run's moves
     run_number = data["runs"] + 1
     data["runs"] = run_number
-    data["move_history"].append({
-        "run": run_number,
-        "moves": move_log,   # [{"step":1,"from":[r,c],"to":[r,c],"dir":"right"}, ...]
-    })
+    data["move_history"].append({"run": run_number, "moves": move_log})
 
     with open(SAVE_PATH, "w") as f:
         json.dump(data, f, indent=2)
 
-    print(f"[Save] Run #{run_number} | {len(cell_exits)} cells | {len(move_log)} moves → {SAVE_PATH}")
 
 
 def load_knowledge():
@@ -58,19 +63,20 @@ def load_knowledge():
     path = Path(SAVE_PATH)
 
     if not path.exists():
-        print("[Memory] No save file → NEW maze")
-        return defaultdict(set), True, 0
+        return defaultdict(dict), True, 0
 
     with open(path) as f:
         data = json.load(f)
 
-    cell_exits = defaultdict(set)
+    # cell_exits: { (row,col): { "up": {"visits":x, "deaths":y}, ... } }
+    cell_exits = defaultdict(dict)
     for k, dirs in data.get("cell_exits", {}).items():
         row, col = (int(x) for x in k.strip("()").split(","))
-        cell_exits[(row, col)] = set(dirs)
+        if isinstance(dirs, list):
+            dirs = {d: {"visits": 0, "deaths": 0} for d in dirs}
+        cell_exits[(row, col)] = dirs
 
     runs = data.get("runs", 0)
-    print(f"[Memory] Loaded {len(cell_exits)} cells | past runs: {runs}")
     return cell_exits, False, runs
 
 
@@ -104,102 +110,22 @@ class Agent:
         self.start      = start
         self.goal       = goal
         self.position   = start
-        self.cell_exits = cell_exits
-        self.wall_hits = 0
-        self.turns = 0
-        self.hazard_hits = 0
-        self.move_log = []
-        self.solution_path = [] 
-        self.path         = [start]
+        self.cell_exits = cell_exits   # { (row,col): { "up": {"visits":x,"deaths":y} } }
 
-        self.path    = [start]
-        self.visited = set()
-        self.steps   = 0
-        self.deaths  = 0
+        self.wall_hits      = 0
+        self.turns          = 0
+        self.steps          = 0
+        self.deaths         = 0
+        self.fire_hits      = 0
+        self.teleport_hits  = 0
+        self.confusion_hits = 0
 
-    def take_turn(self, actions):
-        moves = 0
-        i = 0
-
-        self.turns += 1
-
-        while moves < 5 and i < len(actions):
-            action = actions[i]
-            i += 1
-
-            prev = self.position
-            self._try_move(action)
-
-            if self.position != prev:
-                moves += 1
-
-            if self.position == self.start and prev != self.start:
-                break
-
-            if self.position == self.goal:
-                return True
-
-        if moves == 5:
-            self.world.hazards = update_fire_in_hazards(self.world.hazards)
-            moves = 0
-
-        return False
-
-    def _try_move(self, direction):
-        row, col = self.position
-        dr, dc   = DIRECTIONS[direction]
-        next_cell = (row + dr, col + dc)
-
-        # WALL
-        if not self.world.can_move(row, col, direction):
-            self.wall_hits += 1
-            return None
-
-        # MOVE
-        self.position = next_cell
-        self.path.append(next_cell)
-        self.steps += 1
-
-        if self.steps % 5 == 0:
-            self.turns += 1
-            self.world.hazards = update_fire_in_hazards(self.world.hazards)
-
-        self.move_log.append({
-            "step": self.steps,
-            "from": [row, col],
-            "to":   list(next_cell),
-            "dir":  direction,
-        })
-
-        self.cell_exits[(row, col)].add(direction)
-        self.cell_exits[next_cell].add(OPPOSITE[direction])
-
-        self.cell_exits[(row, col)].add(direction)
-
-        # FIRE
-        if not self.world.is_alive(*next_cell):
-            self.deaths += 1
-            self.position = self.start
-            self.path.append(self.start)
-            return None
-
-        # HAZARDS
-        hazard = self.world.get_hazard(*next_cell)
-        if hazard is not None:
-            self.hazard_hits += 1
-
-            if hazard in {Hazard.TP_GREEN, Hazard.TP_YELLOW, Hazard.TP_PURPLE}:
-                pairs = get_teleport_pairs(self.world.hazards)
-                pair  = pairs[hazard]
-                if len(pair) == 2:
-                    dest = pair[0] if pair[1] == next_cell else pair[1]
-                    self.position = dest
-                    self.path.append(dest)
-
-        return self.position
+        self.move_log      = []
+        self.path          = [start]
+        self.visited_count = defaultdict(int)
 
     def _astar(self):
-        """Find shortest path using known exits."""
+        """Find shortest path from start to goal using known exits."""
         def h(c):
             return abs(c[0] - self.goal[0]) + abs(c[1] - self.goal[1])
 
@@ -210,91 +136,163 @@ class Agent:
             _, g, cell, route = heapq.heappop(heap)
             if cell == self.goal:
                 return route
-            for direction in self.cell_exits.get(cell, []):
-                dr, dc     = DIRECTIONS[direction]
-                neighbour  = (cell[0] + dr, cell[1] + dc)
-                ng         = g + 1
+            for direction in self.cell_exits.get(cell, {}):
+                dr, dc    = DIRECTIONS[direction]
+                neighbour = (cell[0] + dr, cell[1] + dc)
+                ng        = g + 1
                 if ng < best_g.get(neighbour, float("inf")):
                     best_g[neighbour] = ng
                     heapq.heappush(heap, (ng + h(neighbour), ng, neighbour, route + [neighbour]))
+        return None
 
-        return None
-    
-    def _direction_between(self, a, b):
-        dr = b[0] - a[0]
-        dc = b[1] - a[1]
-        for name, (r, c) in DIRECTIONS.items():
-            if (r, c) == (dr, dc):
-                return name
-        return None
+    def _print_summary(self, result, runtime):
+        print("\n========== RESULTS ==========")
+        print(f"Result      : {'SUCCESS' if result else 'FAILED'}")
+        print(f"Steps       : {self.steps}")
+        print(f"Turns       : {self.turns}")
+        print(f"Wall hits   : {self.wall_hits}")
+        print(f"Deaths      : {self.deaths}")
+        print(f"  Fire hits       : {self.fire_hits}")
+        print(f"  Teleport hits   : {self.teleport_hits}")
+        print(f"  Confusion hits  : {self.confusion_hits}")
+        print(f"Runtime     : {runtime:.2f}s")
+        print("=============================\n")
 
     def solve(self):
-        print(f"Start: {self.start}  Goal: {self.goal}")
+        """Run 1: blind exploration. Run 2+: A* on known exits, then explore."""
+        import time
+        MAX_TURNS  = 10_000
+        start_time = time.time()
 
-        found = False
-        route = self._astar()
+        # ── If we have prior knowledge, try A* first ────────────────────────
+        if self.cell_exits:
+            route = self._astar()
+            if route:
+                moves_this_turn = 0
+                for i in range(len(route) - 1):
+                    next_cell = route[i + 1]
+                    self.position = next_cell
+                    self.visited_count[next_cell] += 1
+                    self.path.append(next_cell)
+                    self.move_log.append(list(next_cell))
+                    self.steps += 1
+                    moves_this_turn += 1
 
-        if route:
-            print(f"Known route: {len(route)-1} steps — walking it...")
-            for i in range(len(route) - 1):
-                self.position = route[i]
-                direction = self._direction_between(route[i], route[i+1])
-                if direction:
-                    self._try_move(direction)
-                if self.position == self.goal:
-                    found = True
+                    if moves_this_turn == 5:
+                        self.turns += 1
+                        moves_this_turn = 0
+                        self.world.hazards = update_fire_in_hazards(self.world.hazards)
+
+                    if self.position == self.goal:
+                        if moves_this_turn > 0:
+                            self.turns += 1  # count the partial turn
+                        self._print_summary(True, time.time() - start_time)
+                        return True
+                self.position = self.start
+
+        # ── Blind / fallback exploration ─────────────────────────────────────
+        for _ in range(MAX_TURNS):
+            self.turns += 1
+
+            moves_made = 0
+            while moves_made < 5:
+                moved = self.move()
+                if moved:
+                    moves_made += 1
+
+                if self.position == self.start and moves_made > 0:
                     break
-            if found:
-                self.solution_path = route  # ← clean A* path
 
-        # Always keep exploring to learn more
-        self.visited.clear()
-        self.position = self.start
-        dfs_found = self._dfs(self.start)
-        found = found or dfs_found
+                if self.position == self.goal:
+                    self._print_summary(True, time.time() - start_time)
+                    return True
 
-        if not self.solution_path and found:
-            # First run — extract goal path from DFS via A* now that we learned
-            self.solution_path = self._astar() or []
+            self.world.hazards = update_fire_in_hazards(self.world.hazards)
 
-        print("\n===== AGENT SUMMARY =====")
-        print(f"Result        : {'SUCCESS' if found else 'FAIL'}")
-        print(f"Solution steps: {len(self.solution_path)-1 if self.solution_path else 'N/A'}")
-        print(f"Steps         : {self.steps}")
-        print(f"Turns         : {self.turns}")
-        print(f"Wall hits     : {self.wall_hits}")
-        print(f"Deaths        : {self.deaths}")
-        print(f"Hazard hits   : {self.hazard_hits}")
-        print(f"Visited cells : {len(self.visited)}")
+        self._print_summary(False, time.time() - start_time)
+        return False
 
-        return found
+    def explore_theCell(self):
+        """Sense all 4 directions from current cell. Does NOT move the agent."""
+        row, col = self.position
 
-    def _dfs(self, cell):
-        self.visited.add(cell)
-        found = (cell == self.goal)
+        if not self.world.is_alive(row, col):
+            self.fire_hits += 1
+            self.deaths += 1
+            save_knowledge(self.cell_exits, self.move_log)
+            self.position = self.start
+            return
 
-        for direction in ["up", "right", "down", "left"]:
+        for direction in DIRECTIONS:
+            if self.world.can_move(row, col, direction):
+                if direction not in self.cell_exits[(row, col)]:
+                    self.cell_exits[(row, col)][direction] = {"visits": 0, "deaths": 0}
+            else:
+                self.wall_hits += 1
+
+    def move(self):
+        """Pick the best direction and move. Returns True if moved."""
+        row, col = self.position
+        cell_key = (row, col)          # ← tuple, NOT str((row, col))
+
+        # ── 1. If we haven't explored this cell yet, explore first ──────────
+        if cell_key not in self.cell_exits:
+            self.explore_theCell()
+            return False
+
+        # ── 2. Get known exits for this cell ────────────────────────────────
+        known_exits = self.cell_exits[cell_key]  # {"up": {"visits":x,"deaths":y}, ...}
+
+        if not known_exits:
+            return False
+
+        # ── 3. Score each exit ───────────────────────────────────────────────
+        def score(direction):
             dr, dc = DIRECTIONS[direction]
-            next_cell = (cell[0] + dr, cell[1] + dc)
+            next_row, next_col = row + dr, col + dc
 
-            if next_cell in self.visited:
-                continue
+            dist    = abs(next_row - self.goal[0]) + abs(next_col - self.goal[1])
+            stats   = known_exits[direction]
+            danger  = stats["deaths"] / (stats["visits"] + 1)
+            revisit = self.visited_count[(next_row, next_col)]
 
-            self.position = cell
-            moved = self._try_move(direction)
+            return dist + (danger * DANGER_WEIGHT) + (revisit * REVISIT_WEIGHT)
 
-            if moved is None:
-                self.position = cell  # ← reset even on wall/fire
-                continue
+        best_direction = min(known_exits, key=score)
 
-            current = self.position
-            if current not in self.visited:
-                if self._dfs(current):
-                    found = True
+        # ── 4. Actually move ─────────────────────────────────────────────────
+        dr, dc = DIRECTIONS[best_direction]
+        new_row, new_col = row + dr, col + dc
 
-            self.position = cell  # backtrack
+        self.cell_exits[cell_key][best_direction]["visits"] += 1
+        self.position = (new_row, new_col)
+        self.visited_count[self.position] += 1
+        self.path.append(self.position)
+        self.move_log.append([new_row, new_col])
+        self.steps += 1
 
-        return found
+        # ── 5. Check hazards after moving ───────────────────────────────────
+        if not self.world.is_alive(new_row, new_col):
+            self.cell_exits[cell_key][best_direction]["deaths"] += 1
+            self.fire_hits += 1
+            self.deaths += 1
+            save_knowledge(self.cell_exits, self.move_log)
+            self.position = self.start
+            self.path.append(self.start)
+            return False
+
+        hazard = self.world.get_hazard(new_row, new_col)
+        if hazard == Hazard.CONFUSION:
+            self.confusion_hits += 1
+        elif hazard in {Hazard.TP_GREEN, Hazard.TP_YELLOW, Hazard.TP_PURPLE}:
+            self.teleport_hits += 1
+            pairs = get_teleport_pairs(self.world.hazards)
+            pair  = pairs.get(hazard, [])
+            if len(pair) == 2:
+                dest = pair[0] if pair[1] == self.position else pair[1]
+                self.position = dest
+                self.path.append(dest)
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +334,6 @@ def render_path(h_walls, v_walls, path, start, goal, run=1, optimized=False):
     for i in range(len(path)-1):
         draw.line([center(path[i]), center(path[i+1])], fill=color, width=width)
 
-    # step numbers only on blind run; just endpoints on optimized
     if not optimized:
         for i, (r, c) in enumerate(path):
             draw.text((c*CELL_PX+2, r*CELL_PX+2), str(i), fill=(0,0,0), font=font)
@@ -347,7 +344,6 @@ def render_path(h_walls, v_walls, path, start, goal, run=1, optimized=False):
 
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     img.save(out)
-    print(f"Saved → {out}  ({len(path)-1} steps)")
 
 
 # ---------------------------------------------------------------------------
@@ -363,19 +359,20 @@ if __name__ == "__main__":
     world = World(h_walls, v_walls, hazards)
     cell_exits, is_new_maze, past_runs = load_knowledge()
 
-    if is_new_maze:
-        print("Starting fresh on a new maze!")
-    else:
-        print(f"Resuming maze (run #{past_runs + 1})")
 
     agent = Agent(world, start, goal, cell_exits)
     found = agent.solve()
 
-    current_run = past_runs + 1  # ← actual run number
+    current_run = past_runs + 1
+    save_knowledge(agent.cell_exits, agent.move_log)
 
-    if found:
-        save_knowledge(agent.cell_exits, agent.move_log)
-
+    # ── Always render the path the agent actually took ───────────────────
     render_path(h_walls, v_walls, agent.path, start, goal,
                 run=current_run,
-                optimized=(found and len(agent.path) < 500))
+                optimized=False)   # blind run = red path with step numbers
+
+    # ── If it found the goal, also render a clean version ───────────────
+    if found:
+        render_path(h_walls, v_walls, agent.path, start, goal,
+                    run=current_run,
+                    optimized=True)  # blue path, just endpoints labeled

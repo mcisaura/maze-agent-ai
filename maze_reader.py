@@ -343,11 +343,8 @@ def update_fire_in_hazards(hazards, grid_size=GRID):
     fire_groups = find_fire_groups(fire_cells)
     new_fire_cells = set()
 
-    print(f"Detected {len(fire_groups)} fire group(s)")
-
-    for i, group in enumerate(fire_groups, start=1):
+    for group in fire_groups:
         pivot = find_fire_pivot(group)
-        print(f"  Group {i}: size={len(group)}, pivot={pivot}")
 
         if pivot is not None:
             rotated_group = rotate_fire_group_cw(group, pivot, grid_size)
