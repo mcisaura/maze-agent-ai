@@ -181,7 +181,7 @@ class Agent:
                     if moves_this_turn == 5:
                         self.turns += 1
                         moves_this_turn = 0
-                        self.world.hazards = update_fire_in_hazards(self.world.hazards)
+                        self.world.hazards, _ = update_fire_in_hazards(self.world.hazards)
 
                     if self.position == self.goal:
                         if moves_this_turn > 0:
@@ -207,7 +207,7 @@ class Agent:
                     self._print_summary(True, time.time() - start_time)
                     return True
 
-            self.world.hazards = update_fire_in_hazards(self.world.hazards)
+            self.world.hazards, _ = update_fire_in_hazards(self.world.hazards)
 
         self._print_summary(False, time.time() - start_time)
         return False
