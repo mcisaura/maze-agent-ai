@@ -279,89 +279,150 @@ def find_fire_groups(fire_cells):
     return groups
 
 
-def find_fire_pivot(fire_group):
+def find_fire_corner(fire_group):
     """
-    Find the pivot of one fire group.
+    Find the junction (corner) of a V-shaped fire group.
 
-    Strategy:
-    choose the cell with the smallest total Manhattan distance
-    to all other cells in the same group.
+    Strategy: look for the articulation point — the cell whose removal
+    splits the group into two disconnected arms. That is exactly where
+    the two arms of the V meet.
+
+    If no single articulation point exists (e.g. a straight line),
+    fall back to the cell with the most 8-connected neighbors.
     """
     if not fire_group:
         return None
 
-    best_cell = None
-    best_score = float("inf")
+    fire_set = set(fire_group)
 
-    for r1, c1 in fire_group:
-        score = 0
-        for r2, c2 in fire_group:
-            score += abs(r1 - r2) + abs(c1 - c2)
+    def is_connected(cells):
+        if not cells:
+            return True
+        start = next(iter(cells))
+        visited = {start}
+        stack = [start]
+        while stack:
+            r, c = stack.pop()
+            for dr in (-1, 0, 1):
+                for dc in (-1, 0, 1):
+                    if dr == 0 and dc == 0:
+                        continue
+                    nbr = (r + dr, c + dc)
+                    if nbr in cells and nbr not in visited:
+                        visited.add(nbr)
+                        stack.append(nbr)
+        return visited == cells
 
-        if score < best_score:
-            best_score = score
-            best_cell = (r1, c1)
+    articulation_points = [
+        cell for cell in fire_group
+        if not is_connected(fire_set - {cell})
+    ]
 
-    return best_cell
+    candidates = articulation_points if articulation_points else list(fire_group)
 
+    def junction_score(cell):
+        """
+        Score = maximum pairwise cosine between neighbor direction vectors.
 
-def rotate_point_around_pivot_cw(row, col, pivot_row, pivot_col):
-    """
-    Rotate one cell 90 degrees clockwise around a pivot.
-    """
-    rel_row = row - pivot_row
-    rel_col = col - pivot_col
+        V apex:    neighbors point in diverging directions → cos ≈  0  (high)
+        Mid-arm:   neighbors point in opposite directions  → cos ≈ -1  (low)
 
-    # 90 deg clockwise: (r, c) -> (c, -r)
-    new_rel_row = rel_col
-    new_rel_col = -rel_row
+        Picking the max selects the true junction, not a pass-through cut.
+        """
+        r, c = cell
+        neighbors = [
+            (r + dr, c + dc)
+            for dr in (-1, 0, 1) for dc in (-1, 0, 1)
+            if (dr, dc) != (0, 0) and (r + dr, c + dc) in fire_set
+        ]
+        if len(neighbors) < 2:
+            return float("-inf")
 
-    new_row = pivot_row + new_rel_row
-    new_col = pivot_col + new_rel_col
+        best = float("-inf")
+        for i in range(len(neighbors)):
+            for j in range(i + 1, len(neighbors)):
+                d1 = (neighbors[i][0] - r, neighbors[i][1] - c)
+                d2 = (neighbors[j][0] - r, neighbors[j][1] - c)
+                dot = d1[0] * d2[0] + d1[1] * d2[1]
+                mag = (d1[0] ** 2 + d1[1] ** 2) ** 0.5 * (d2[0] ** 2 + d2[1] ** 2) ** 0.5
+                if mag > 0:
+                    best = max(best, dot / mag)
+        return best
 
-    return new_row, new_col
+    return max(candidates, key=junction_score)
 
 
 def rotate_fire_group_cw(fire_group, pivot, grid_size=GRID):
     """
-    Rotate one fire group 90 degrees clockwise around its pivot.
-    Cells outside the grid are removed.
+    Rotate one fire group 90 degrees clockwise around the pivot cell.
+
+    The pivot maps to itself: (0, 0) relative → (0, 0) relative.
+    Every other cell orbits it: (r, c) relative → (c, -r) relative.
+    After 4 calls the group is back to its original position.
+
+    Cells that land outside the grid are clipped.
     """
-    pivot_row, pivot_col = pivot
-    new_group = set()
+    pr, pc = pivot
+    new_group = {pivot}  # pivot cell is fixed — always stays in place
 
     for row, col in fire_group:
-        nr, nc = rotate_point_around_pivot_cw(row, col, pivot_row, pivot_col)
-
+        if (row, col) == pivot:
+            continue
+        rel_r = row - pr
+        rel_c = col - pc
+        # 90° CW: (r, c) → (c, -r)
+        nr = pr + rel_c
+        nc = pc - rel_r
         if 0 <= nr < grid_size and 0 <= nc < grid_size:
             new_group.add((nr, nc))
 
     return new_group
 
 
-def update_fire_in_hazards(hazards, grid_size=GRID):
+def update_fire_in_hazards(hazards, fire_pivots=None, grid_size=GRID):
     """
-    Rotate each separate fire group around its own auto-detected pivot.
-    Non-fire hazards stay the same.
+    Rotate each fire group 90° CW around its pivot and return the updated
+    hazards plus the new pivot set.
+
+    Parameters
+    ----------
+    hazards      : dict {(row, col): Hazard}
+    fire_pivots  : set of (row, col) — pivot positions from the previous call.
+                   Pass None (or omit) on the very first call; pivots are then
+                   auto-detected and returned so you can pass them next time.
+
+    Returns
+    -------
+    new_hazards  : dict {(row, col): Hazard}
+    new_pivots   : set of (row, col) — pivot positions after this rotation,
+                   ready to be passed back on the next call.
     """
+    if fire_pivots is None:
+        fire_pivots = set()
+
     static_hazards = {cell: hz for cell, hz in hazards.items() if hz != Hazard.FIRE}
     fire_cells = {cell for cell, hz in hazards.items() if hz == Hazard.FIRE}
 
     fire_groups = find_fire_groups(fire_cells)
     new_fire_cells = set()
+    new_pivots = set()
 
     for group in fire_groups:
-        pivot = find_fire_pivot(group)
+        # Reuse the known pivot if it is still present in this group;
+        # otherwise detect a fresh one (first call, or after a cell was clipped).
+        known = fire_pivots & group
+        pivot = next(iter(known)) if known else find_fire_corner(group)
 
         if pivot is not None:
             rotated_group = rotate_fire_group_cw(group, pivot, grid_size)
             new_fire_cells.update(rotated_group)
+            new_pivots.add(pivot)  # pivot cell is always kept by rotate_fire_group_cw
 
     new_hazards = dict(static_hazards)
     for cell in new_fire_cells:
         new_hazards[cell] = Hazard.FIRE
 
-    return new_hazards
+    return new_hazards, new_pivots
 
 
 # ---------------------------------------------------------------------------

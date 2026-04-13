@@ -22,6 +22,7 @@ HAZARD_FILL = {
     Hazard.TP_GREEN:  (120, 230, 150),
     Hazard.TP_YELLOW: (255, 235, 100),
     Hazard.TP_PURPLE: (210, 140, 255),
+    Hazard.TP_RED:    (255, 150, 150),
 }
 
 HAZARD_SHORT = {
@@ -30,6 +31,7 @@ HAZARD_SHORT = {
     Hazard.TP_GREEN:  "GRN",
     Hazard.TP_YELLOW: "YLW",
     Hazard.TP_PURPLE: "PRP",
+    Hazard.TP_RED:    "RED",
 }
 
 START_FILL = (180, 255, 180)
@@ -59,6 +61,7 @@ def _font(size):
 # ---------------------------------------------------------------------------
 def print_fire_turns(hazards, num_turns=4):
     current_hazards = dict(hazards)
+    pivots = None
 
     for turn in range(num_turns + 1):
         fire_cells = sorted(
@@ -71,7 +74,7 @@ def print_fire_turns(hazards, num_turns=4):
             print(cell)
 
         if turn < num_turns:
-            current_hazards = update_fire_in_hazards(current_hazards)
+            current_hazards, pivots = update_fire_in_hazards(current_hazards, pivots)
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +178,7 @@ def render_annotated(h_walls, v_walls, start, goal, hazards, out_path, turn=None
 # ---------------------------------------------------------------------------
 def render_fire_turns(h_walls, v_walls, start, goal, hazards, out_dir, num_turns=4):
     current_hazards = dict(hazards)
+    pivots = None
 
     for turn in range(num_turns + 1):
         out_path = out_dir / f"maze_turn_{turn}.png"
@@ -191,7 +195,7 @@ def render_fire_turns(h_walls, v_walls, start, goal, hazards, out_dir, num_turns
         print(fire_cells)
 
         if turn < num_turns:
-            current_hazards = update_fire_in_hazards(current_hazards)
+            current_hazards, pivots = update_fire_in_hazards(current_hazards, pivots)
 
 
 # ---------------------------------------------------------------------------
