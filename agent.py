@@ -60,6 +60,13 @@ class HybridAgent:
         self.alpha   = 0.2
         self.gamma   = 0.95
 
+        # ── Epsilon-greedy exploration schedule ───────────────────────────────
+        # Starts fully exploratory; decays toward min after each episode so the
+        # agent increasingly exploits what the Q-table has learned.
+        self.epsilon       = 1.0    # current exploration rate
+        self.epsilon_min   = 0.05   # never go fully greedy
+        self.epsilon_decay = 0.995  # multiplied each episode
+
         # ── State ─────────────────────────────────────────────────────────────
         self.phase        = 1
         self.current_pos: Optional[Tuple] = None
@@ -112,6 +119,10 @@ class HybridAgent:
         self.episode_cells    = [start_pos]
         self.total_episodes  += 1
         self.episode_world_actions = []
+
+        # Decay epsilon each episode: agent exploits Q-table more over time
+        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+        print(f"  [RL] epsilon={self.epsilon:.4f}")
 
         if self.phase == 2 and self.optimal_path:
             self.action_queue = list(self.optimal_path)
@@ -290,16 +301,30 @@ class HybridAgent:
 
         State includes time_mod_20 so the agent can wait for fire to rotate
         if that produces a shorter safe route.
+
+        The heap priority blends the cell's row position with its Q-value so
+        that the search steers toward cells the Q-table considers promising
+        (e.g. away from fire corridors, toward productive directions) while
+        still guaranteeing it finds an unvisited cell.
         """
         if self.current_pos is None:
             return []
 
         start_t = self._current_tmod20()
 
-        # heap item: (row_priority, distance, (r, c), tmod20, path)
-        heap = [(self.current_pos[0], 0, self.current_pos, start_t, [])]
+        def q_priority(r, c):
+            # Higher Q-value → lower heap number → explored sooner.
+            # Scale factor 0.5 keeps Q-bias subordinate to row distance so
+            # the upward bias is preserved but Q-learning meaningfully influences
+            # which corridor the agent prefers when distance is equal.
+            q_val = float(np.max(self.q_table[r, c]))
+            return r - 0.5 * q_val
+
+        # heap item: (priority, distance, (r, c), tmod20, path)
+        r0, c0 = self.current_pos
+        heap = [(q_priority(r0, c0), 0, self.current_pos, start_t, [])]
         best: Dict[Tuple[int, int, int], int] = {
-            (self.current_pos[0], self.current_pos[1], start_t): 0
+            (r0, c0, start_t): 0
         }
 
         while heap:
@@ -320,7 +345,7 @@ class HybridAgent:
                 if action != ACTION_WAIT and (nr, nc) not in self.visited:
                     return new_path
 
-                heappush(heap, (nr, nd, (nr, nc), nt, new_path))
+                heappush(heap, (q_priority(nr, nc), nd, (nr, nc), nt, new_path))
 
         return []
 
@@ -648,8 +673,25 @@ class HybridAgent:
             self.phase = 1
             self.action_queue = []
 
-        # Phase 1: cautious exploration = 1 action per turn
+        # Phase 1: epsilon-greedy RL exploration
+        # With probability epsilon: exploit Q-table (pick best valid action).
+        # Otherwise: fall back to Q-biased BFS to reach the nearest new cell.
         if not self.action_queue:
+            if self.current_pos is not None and random.random() > self.epsilon:
+                # ── Exploit: let the Q-table choose ──────────────────────────
+                r, c = self.current_pos
+                best_action = None
+                best_q = -float("inf")
+                for a in MOVE_ACTIONS:
+                    if self._can_move(r, c, a):
+                        q = float(self.q_table[r, c, a])
+                        if q > best_q:
+                            best_q = q
+                            best_action = a
+                if best_action is not None:
+                    print(f"  [RL] exploit Q-table: action={best_action} q={best_q:.2f} ε={self.epsilon:.3f}")
+                    return self._submit([best_action])
+            # ── Explore: Q-biased BFS toward nearest unvisited cell ───────────
             self.action_queue = self._bfs_explore()
 
         # Exploration exhausted but goal is known → head there directly.
@@ -714,6 +756,7 @@ class HybridAgent:
         t, s = self.total_episodes, self.successful_episodes
         return {
             "phase":            self.phase,
+            "epsilon":          round(self.epsilon, 4),
             "total_episodes":   t,
             "successful":       s,
             "success_rate":     round(s / t * 100, 1) if t else 0.0,
@@ -736,7 +779,8 @@ class HybridAgent:
         print("\n" + "=" * 55)
         print("AGENT PERFORMANCE METRICS")
         print("=" * 55)
-        print(f"  Phase              : {'SPEED RUN (A*)' if m['phase']==2 else 'EXPLORING (Biased BFS)'}")
+        print(f"  Phase              : {'SPEED RUN (A*)' if m['phase']==2 else 'EXPLORING (ε-greedy + BFS)'}")
+        print(f"  Epsilon (ε)        : {m['epsilon']} (min={self.epsilon_min}, decay={self.epsilon_decay})")
         print(f"  Optimal path       : {m['optimal_path_len']} steps")
         print(f"  Episodes run       : {m['total_episodes']}")
         print(f"  Successful         : {m['successful']}")
@@ -751,3 +795,4 @@ class HybridAgent:
         print(f"  Teleports mapped   : {m['teleports_mapped']} pairs")
         print(f"  Confusion cells    : {m['confuse_mapped']}")
         print("=" * 55)
+    

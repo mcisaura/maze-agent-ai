@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import time
 from agent import HybridAgent
@@ -20,6 +21,16 @@ def train():
 
     env   = MazeEnvironment(MAZE_PATH, HAZARD_PATH)
     agent = HybridAgent()
+
+    # ── Load existing Q-table if available ───────────────────────────────────
+    # This lets the agent pick up where it left off across training sessions.
+    # The Q-table improves cumulatively — each run the agent exploits more and
+    # explores less, converging toward the optimal path faster.
+    if os.path.exists(SAVE_PATH):
+        agent.q_table = np.load(SAVE_PATH)
+        print(f"Loaded Q-table from {SAVE_PATH}  (non-zero entries: {np.count_nonzero(agent.q_table)})")
+    else:
+        print("No saved Q-table found — starting fresh.")
 
     print("fresh agent check")
     print("walls:", len(agent.walls))
@@ -87,6 +98,7 @@ def train():
             f"deaths={stats['deaths']:>2} | "
             f"cells={m['unique_cells']:>4} | "
             f"goal={'YES' if m['goal_found'] else 'no':<3} | "
+            f"ε={m['epsilon']:.3f} | "
             f"success={m['success_rate']:>5.1f}% | "
             f"t={elapsed:.0f}s"
         )
